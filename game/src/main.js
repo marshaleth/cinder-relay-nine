@@ -1,134 +1,23 @@
-// Boot and the one loop: input is read every frame, the world advances in fixed 1/60 s steps
-// (several in a slow frame, none in a fast one), and the renderer paints what is there. The game
-// moves between four screens: title, play, paused and game over.
-//
-// ?seed=N fixes the falling pattern. ?shot=start|play|end (with &seed=N) stages that scene
-// instead of running the loop, paints it twice and sets window.__shotReady for a screenshot.
-import { BEST_KEY, LIVES, STEP } from './config.js';
-import { createRandom } from './random.js';
-import { createWorld, EVENT_HIT, EVENT_OVER } from './world.js';
-import { ACTION_CONFIRM, ACTION_PAUSE, createInput } from './input.js';
-import { createRenderer, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
-import { stageShot } from './shots.js';
-
-/** The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped, not replayed. */
-const MAX_FRAME = 0.25;
-
-const params = new URLSearchParams(window.location.search);
-const shot = params.get('shot');
-const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 4294967296);
-
-const canvas = document.getElementById('game');
-const status = document.getElementById('status');
-const world = createWorld(createRandom(seed));
-const renderer = createRenderer(canvas);
-
-function readBest() {
-  try {
-    return Number.parseInt(window.localStorage.getItem(BEST_KEY) ?? '0', 10) || 0;
-  } catch {
-    return 0;
-  }
-}
-
-function saveBest(value) {
-  try {
-    window.localStorage.setItem(BEST_KEY, String(value));
-  } catch {
-    // Storage can be off (private windows): the best score then lasts this visit only.
-  }
-}
-
-function runShot(name) {
-  const scene = stageShot(name, world);
-  let painted = 0;
-  function paint() {
-    renderer.draw(world.state, scene.screen, scene.best);
-    painted += 1;
-    if (painted < 2) requestAnimationFrame(paint);
-    else window.__shotReady = true;
-  }
-  requestAnimationFrame(paint);
-}
-
-function runGame() {
-  const input = createInput(canvas);
-  let screen = SCREEN_TITLE;
-  let best = readBest();
-  let accumulator = 0;
-  let last = performance.now();
-
-  // Screen readers (and anyone watching the page's text) hear the screen changes and each hit.
-  function announce(message) {
-    status.textContent = message;
-  }
-
-  function startGame() {
-    world.reset();
-    accumulator = 0;
-    screen = SCREEN_PLAY;
-    announce(`Playing. ${LIVES} lives.`);
-  }
-
-  function endGame() {
-    screen = SCREEN_OVER;
-    if (world.state.score > best) {
-      best = world.state.score;
-      saveBest(best);
-    }
-    announce(`Game over. Score ${world.state.score}. Best ${best}.`);
-  }
-
-  function handleActions() {
-    const actions = input.takeActions();
-    if (actions & ACTION_CONFIRM && (screen === SCREEN_TITLE || screen === SCREEN_OVER)) startGame();
-    else if (actions & ACTION_PAUSE && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
-    } else if (actions & (ACTION_PAUSE | ACTION_CONFIRM) && screen === SCREEN_PAUSED) {
-      screen = SCREEN_PLAY;
-      announce('Playing.');
-    }
-  }
-
-  function step() {
-    if (screen === SCREEN_TITLE) {
-      world.step(STEP, 0, true);
-      return;
-    }
-    const events = world.step(STEP, input.direction(), false);
-    if (events & EVENT_OVER) endGame();
-    else if (events & EVENT_HIT) announce(world.state.lives === 1 ? 'Hit. 1 life left.' : `Hit. ${world.state.lives} lives left.`);
-  }
-
-  function frame(now) {
-    requestAnimationFrame(frame);
-    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
-    last = now;
-    handleActions();
-    if (screen === SCREEN_TITLE || screen === SCREEN_PLAY) {
-      while (accumulator >= STEP && (screen === SCREEN_TITLE || screen === SCREEN_PLAY)) {
-        step();
-        accumulator -= STEP;
-      }
-    } else {
-      accumulator = 0;
-    }
-    renderer.draw(world.state, screen, best);
-  }
-
-  // Leaving the tab pauses a running game rather than letting blocks fall unseen.
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
-    }
-  });
-
-  announce('Block Dodger. Press Space or click to start.');
-  requestAnimationFrame(frame);
-}
-
-if (shot) runShot(shot);
-else runGame();
+import {createInput} from './input.js';
+import {createAudio} from './audio.js';
+import {createSimulation,guns} from './sim.js';
+import {createView} from './render.js';
+import {blocks,sites} from './map.js';
+const $=id=>document.getElementById(id),canvas=$('game'),input=createInput(canvas),audio=createAudio(),sim=createSimulation(audio),s=sim.state,view=createView(canvas,s);
+const ids=['score0','score1','phase','timer','round','role','task','notice','health','armor','money','buyHint','weapon','mag','reserve','utility','hit','damage','interaction','interactText','progress','result','resultTag','resultTitle','resultCopy','pause','shop'];
+const ui={};for(const id of ids)ui[id]=$(id);
+const map=$('map').getContext('2d');let last=0,accumulator=0,hudClock=0;
+$('play').onclick=()=>{audio.start();sim.start();$('overlay').hidden=true;input.lock();};$('resume').onclick=()=>input.lock();
+for(const button of document.querySelectorAll('[data-buy]'))button.onclick=()=>sim.buy(Number(button.dataset.buy));
+function minimap(){const scale=3.65;map.clearRect(0,0,180,180);map.fillStyle='#183a3d';map.fillRect(0,0,180,180);map.fillStyle='#6e8580';for(const b of blocks)map.fillRect(90+b.minX*scale,90+b.minZ*scale,b.w*scale,b.d*scale);for(let i=0;i<2;i++){const site=sites[i];map.fillStyle='#e9a364';map.font='bold 12px monospace';map.fillText(i?'B':'A',86+site.x*scale,94+site.z*scale);}
+ for(const a of s.actors){if(!a.alive)continue;if(a.team!==0&&!s.bomb.active&&!(s.time-s.noise.time<.4&&Math.hypot(a.x-s.noise.x,a.z-s.noise.z)<1))continue;map.fillStyle=a===s.p?'#fff2c4':a.team===0?'#8ce6d0':'#ed835d';map.beginPath();map.arc(90+a.x*scale,90+a.z*scale,a===s.p?3.5:2.5,0,Math.PI*2);map.fill();if(a===s.p){map.strokeStyle='#fff2c4';map.beginPath();map.moveTo(90+a.x*scale,90+a.z*scale);map.lineTo(90+a.x*scale-Math.sin(a.yaw)*10,90+a.z*scale-Math.cos(a.yaw)*10);map.stroke();}}
+ if(s.bomb.active){map.strokeStyle='#ffbe6b';map.strokeRect(86+s.bomb.x*scale,86+s.bomb.z*scale,8,8);}}
+function hud(){const p=s.p,time=s.phase==='buy'?s.phaseTime:s.bomb.active?s.bomb.timer:s.timer,t=Math.max(0,Math.ceil(time));ui.score0.textContent=s.score[0];ui.score1.textContent=s.score[1];ui.timer.textContent=String(Math.floor(t/60)).padStart(2,'0')+':'+String(t%60).padStart(2,'0');ui.phase.textContent=s.bomb.active?'CHARGE ARMED':s.phase==='buy'?'DEPLOY / ENTER TO SKIP':s.phase==='end'?'ROUND COMPLETE':'RELAYS LIVE';ui.round.textContent=String(s.round).padStart(2,'0');ui.role.textContent=s.attack===0?'ATTACK':'DEFEND';ui.task.textContent=s.bomb.active?(s.attack===0?'Protect the charge':'Hold E near charge to defuse'):s.attack===0?'Hold E at A or B to plant':'Prevent the plant. Hold the relays.';ui.notice.textContent=s.noticeTime>0?s.notice:'';ui.health.textContent=Math.ceil(p.hp);ui.armor.textContent='◇ '+Math.ceil(p.armor)+' ARMOR';ui.money.textContent='₡ '+s.money.toLocaleString('en-US');ui.buyHint.textContent=s.phase==='buy'?'B / REQUISITIONS':'BUY PERIOD CLOSED';ui.weapon.textContent=p.reload>0?'RELOADING…':guns[p.gun].name;ui.mag.textContent=p.mag;ui.reserve.textContent=' / '+p.reserve;ui.utility.textContent='FRAG × '+p.grenades+' · '+(p.alive?'WARDEN':'SPECTATING');ui.hit.style.opacity=s.hit>0?1:0;ui.hit.style.color=s.head?'#f4ab68':'#d8fff0';ui.damage.style.opacity=s.hurt*.9;ui.shop.hidden=!s.buy;ui.pause.hidden=!s.started||input.locked||s.buy||s.phase==='intro';
+ const progress=Math.max(s.plantProgress,s.defuseProgress);let prompt='';if(!s.bomb.active&&s.attack===0){for(const site of sites)if(Math.hypot(p.x-site.x,p.z-site.z)<2.7)prompt='HOLD E · PLANT CHARGE';}else if(s.bomb.active&&s.attack!==0&&Math.hypot(p.x-s.bomb.x,p.z-s.bomb.z)<2.3)prompt='HOLD E · DISARM CHARGE';ui.interaction.style.display=prompt&&p.alive?'block':'none';ui.interactText.textContent=prompt;ui.progress.style.width=progress*100+'%';
+ ui.result.style.display=s.phase==='end'?'block':'none';ui.resultTag.textContent=s.match?'OPERATION COMPLETE':'RELAY NINE / ROUND '+s.round;ui.resultTitle.textContent=s.match?(s.score[0]>=5?'WARDEN VICTORY':'EMBER VICTORY'):s.message;ui.resultCopy.textContent=s.match?'ENTER TO RESTART THE OPERATION':s.message+' · Next deployment in '+Math.ceil(s.phaseTime)+'s · ENTER to continue';minimap();}
+function frame(ms){requestAnimationFrame(frame);const dt=Math.min(.1,last?(ms-last)/1000:0);last=ms;
+ if(input.locked&&s.started){s.p.yaw-=input.dx*.002;s.p.pitch=Math.max(-1.4,Math.min(1.4,s.p.pitch-input.dy*.002));input.dx=input.dy=0;accumulator+=dt;while(accumulator>=1/60){sim.step(1/60,input);accumulator-=1/60;}}
+ else {input.dx=input.dy=0;accumulator=0;if(s.buy){if(input.pressed.has('KeyB'))s.buy=false;for(let i=0;i<5;i++)if(input.pressed.has('Digit'+(i+1)))sim.buy(i);input.pressed.clear();}}
+ hudClock+=dt;if(hudClock>.05){hudClock=0;hud();}view.draw();}
+// The initial view is the live map; no fabricated screenshot or alternate render path.
+s.p.x=0;s.p.z=19;s.p.eye=1.6;hud();requestAnimationFrame(frame);
